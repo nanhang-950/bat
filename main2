@@ -1,0 +1,87 @@
+package main
+
+import (
+    "fmt"
+    "bat/fn"
+    "sync"
+    "time"
+)
+
+func main() {
+    fn.Banner()
+    fmt.Println("扫描开始，请耐心等待")
+
+    // 初始化一个长度为10的字符串切片，用于存储CIDR格式的网段
+    cidrs := make([]string, 10)
+
+    // 获取网段ip
+    cidrs = fn.Getlocalip()
+
+    // 定义一个用于存储ip的切片
+    var IPs []string
+
+    // 遍历每个cidr地址段
+    for _, cidr := range cidrs {
+        // 遍历每个CIDR地址段，使用GenerateIPs生成对应的ip地址列表
+        ips, err := fn.GenerateIPs(cidr)
+
+        // 错误处理
+        if err != nil {
+            fmt.Println("Error:", err)
+            continue
+        }
+        // 将生成的ip地址追加到IPs切片中
+        IPs = append(IPs, ips...)
+    }
+
+    var commonPorts = []int{80, 443, 22, 21, 3389, 25, 23, 137, 138, 139, 3389}
+
+    // 并发扫描
+    var wg sync.WaitGroup
+    results1 := make(chan string, len(IPs))
+
+    // 控制最大并发数
+    const maxConcurrency = 1000
+    semaphore := make(chan struct{}, maxConcurrency)
+
+    start := time.Now()
+    fmt.Println("存活主机")
+    for _, ip := range IPs {
+        wg.Add(1)
+        go func(ip string) {
+            defer wg.Done()
+            semaphore <- struct{}{} // 请求一个槽位
+            defer func() { <-semaphore }() // 释放一个槽位
+            if fn.IcmpScan(ip) || fn.TcpScan(ip, commonPorts) {
+                results1 <- ip
+                fmt.Println(ip)
+            }
+        }(ip)
+    }
+
+    wg.Wait()
+    close(results1)
+    for ip:=range results1{
+      IPs=append(IPs,ip)
+    }
+    results2:=make(chan fn.ScanResult,len(IPs)*len(fn.DefaultPorts))
+    for _,ip:=range IPs{
+      portsTask:=make(chan int,len(fn.DefaultPorts))
+      for _,port:=range fn.DefaultPorts{
+        portsTask<-port
+      }
+      close(portsTask)
+      for threads:=0;threads<600;threads++{
+        wg.Add(1)
+        go fn.Scan(ip,portsTask,results2,&wg)
+      }
+    }
+    wg.Wait()
+    close(results2)
+    // 输出扫描结果信息
+    // 生成报告文件
+    fn.Savefile(results2)
+    // 输出扫描结果信息
+    fmt.Println("扫描报告已生成：result.html")
+    fmt.Println("用时：", time.Since(start).String())
+}
