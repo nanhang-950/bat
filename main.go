@@ -1,32 +1,38 @@
 package main
 
 import (
-	"fmt"
 	"bat/fn"
+	"bufio"
+	"fmt"
+	"os"
 	"sync"
 	"time"
+
+	"github.com/schollz/progressbar/v3"
 )
 
 func main() {
 	fn.Banner()
-	fmt.Println("扫描开始，请耐心等待")
+	fmt.Printf("\n扫描开始，请耐心等待\n")
 
-	// 获取网段ip
+	// 获取网卡ip
 	cidrs := fn.Getlocalip()
 
 	// 定义一个用于存储ip的切片
 	var allIPs []string
 
+	// 创建一个新的进度条
+	bar := progressbar.Default(int64(len(cidrs) * 100))
+
 	// 遍历每个cidr地址段
 	for _, cidr := range cidrs {
-		// 使用 GenerateIPs 生成对应的 ip 地址列表
 		ips, err := fn.GenerateIPs(cidr)
 		if err != nil {
-			fmt.Println("Error:", err)
+			fmt.Println("错误:", err)
 			continue
 		}
-		// 将生成的 ip 地址追加到 allIPs 切片中
 		allIPs = append(allIPs, ips...)
+		bar.Add(len(ips))
 	}
 
 	// 常见端口列表
@@ -36,35 +42,43 @@ func main() {
 	var wg sync.WaitGroup
 	results1 := make(chan string, len(allIPs))
 
-	// 控制最大并发数
+	// 并发数
 	const maxConcurrency = 1000
 	semaphore := make(chan struct{}, maxConcurrency)
 
 	start := time.Now()
-	fmt.Println("存活主机")
 
+	// 扫描 IP 地址
 	for _, ip := range allIPs {
 		wg.Add(1)
 		go func(ip string) {
 			defer wg.Done()
-			semaphore <- struct{}{} // 请求一个槽位
+			semaphore <- struct{}{}        // 请求一个槽位
 			defer func() { <-semaphore }() // 释放一个槽位
-			if fn.IcmpScan(ip) || fn.TcpScan(ip, commonPorts) {
+
+			//默认使用Icmp扫描存活，如果Icmp失败则使用Tcp
+			if fn.IcmpScan(ip) {
 				results1 <- ip
-				fmt.Println(ip)
+			} else if fn.TcpScan(ip, commonPorts) {
+				results1 <- ip
 			}
+			bar.Add(1)
 		}(ip)
 	}
 
-	wg.Wait()
-	close(results1)
+	go func() {
+		wg.Wait()
+		close(results1)
+	}()
 
 	var aliveIPs []string
+
 	for ip := range results1 {
 		aliveIPs = append(aliveIPs, ip)
 	}
 
 	results2 := make(chan fn.ScanResult, len(aliveIPs)*len(fn.DefaultPorts))
+	results2Copy := make(chan fn.ScanResult, len(aliveIPs)*len(fn.DefaultPorts))
 
 	for _, ip := range aliveIPs {
 		portsTask := make(chan int, len(fn.DefaultPorts))
@@ -76,16 +90,30 @@ func main() {
 		for threads := 0; threads < 600; threads++ {
 			wg.Add(1)
 			go fn.Scan(ip, portsTask, results2, &wg)
+			wg.Add(1)
+			go fn.Scan(ip, portsTask, results2Copy, &wg)
 		}
 	}
 
-	wg.Wait()
-	close(results2)
+	go func() {
+		wg.Wait()
+		close(results2)
+		close(results2Copy)
+	}()
+
+	// 更新进度条至 100%
+	bar.Finish()
+
+	// 使用全局通道 调用ai扫描接口 来传递数据给AiInterface
+	fn.ProcessWebSocketData(results2Copy)
 
 	// 生成报告文件
 	fn.Savefile(results2)
 
 	// 输出扫描结果信息
-	fmt.Println("扫描报告已生成：result.html")
-	fmt.Println("用时：", time.Since(start).String())
+	fmt.Printf("\n扫描报告已生成：内网测绘报告.html\n")
+	fmt.Printf("用时： %.2f 秒\n", time.Since(start).Seconds())
+	fmt.Println("按回车键退出...")
+	reader := bufio.NewReader(os.Stdin)
+	reader.ReadString('\n')
 }

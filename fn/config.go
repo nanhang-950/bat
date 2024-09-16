@@ -10,9 +10,9 @@ type ScanResult struct {
 	Port     int
 	Protocol string
 	OS       string
-  Bb       string
 }
 
+var CommonPorts=[]int{22,631,514,111,135,139,445,3389,5585}
 
 var OsCache sync.Map
 // 常见的端口号的切片
